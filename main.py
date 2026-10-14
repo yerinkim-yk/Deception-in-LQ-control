@@ -7,49 +7,57 @@ from red_team_original import RedTeam
 
 
 # Overall settings
-var_z = 0.05
-var_y = 0.05
+n_dim = 1  # Dimension of v and p (state x = (v, p) is 2*n_dim dimensional)
+var_z = 0.05  # Scalar (meaning var_z*I) or (n_dim, n_dim) covariance matrix
+var_y = 0.05  # Scalar (meaning var_y*I) or (n_dim, n_dim) covariance matrix
 lambda_list = np.arange(0.0,0.51,0.1)
 num_traj = 1
-len_traj = 21
-s_b_value = 0.5
-s_c_value = -0.1
+terminal_time = 20  # T: controls u_0, ..., u_{T-1}
+len_traj = terminal_time + 1  # Number of states x_0, ..., x_T
+# Deception pattern matrices F^b, F^c, each (n_dim, n_dim); replace with any matrices
+s_b_matrix = 0.5*np.eye(n_dim)
+s_c_matrix = -0.1*np.eye(n_dim)
 alpha_error = 0.01
 beta_error = 0.01
 log_U = np.log((1-beta_error)/alpha_error)
-sample_size = 200
-random_noise = False  # False: same seeded noise sequence for every trajectory; True: independent noise
+sample_size = 20000
+random_noise = False  # False: fixed seed, every lambda sees the same noise sequence (trajectories still differ); True: fresh noise each run
 
 cmap = plt.get_cmap('plasma')
 
 
 # ---------- Experiments ----------
 
-def make_misdirection_pattern(kind, value, length):
-    """ kind: "standard" (constant), "negative" (negated constant), or "sinusoidal". Unknown kinds fall back to "standard". """
+def make_misdirection_pattern(kind, matrix, length):
+    """
+    Time-varying pattern built from an (n, n) matrix, returns (length, n, n).
+    kind: "standard" (constant), "negative" (negated constant), or "sinusoidal". Unknown kinds fall back to "standard".
+    """
+    matrix = np.asarray(matrix, dtype=float)
 
     if kind == "negative":
-        return -value*np.ones(length)
+        return -matrix*np.ones((length, 1, 1))
     if kind == "sinusoidal":
-        return value*np.sin(np.linspace(0, length, length))
-    return value*np.ones(length)
+        return np.sin(np.arange(length))[:, None, None]*matrix  # sin(t), t = 0, 1, ..., length-1
+    return matrix*np.ones((length, 1, 1))
 
 
-def run_experiments_with_fixed_lambda(num_traj, len_traj, s_b_value, s_c_value, deception_parameter,
+def run_experiments_with_fixed_lambda(num_traj, terminal_time, s_b_matrix, s_c_matrix, deception_parameter,
                                       misdirection_b = "standard", misdirection_c = "standard",
                                       compute_probabilities = False):
 
-    blue_team = BlueTeam(var_z = var_z,
-                               var_y = var_y,
-                               deception_parameter = deception_parameter,
-                               terminal_time = len_traj,
-                               random_noise = random_noise)
-    blue_team.s_b = make_misdirection_pattern(misdirection_b, s_b_value, len_traj)
-    blue_team.s_c = make_misdirection_pattern(misdirection_c, s_c_value, len_traj)
+    blue_team = BlueTeam(n_dim = n_dim,
+                         var_z = var_z,
+                         var_y = var_y,
+                         deception_parameter = deception_parameter,
+                         terminal_time = terminal_time,
+                         random_noise = random_noise)
+    blue_team.s_b = make_misdirection_pattern(misdirection_b, s_b_matrix, terminal_time)
+    blue_team.s_c = make_misdirection_pattern(misdirection_c, s_c_matrix, terminal_time)
     blue_team.set_matrices()
 
-    red_team = RedTeam(terminal_time = len_traj, s_b = blue_team.s_b, s_c = blue_team.s_c, s_d = blue_team.s_d,
-                          var_z = var_z, var_y = var_y, alpha = alpha_error, beta = beta_error)
+    red_team = RedTeam(terminal_time = terminal_time, s_b = blue_team.s_b, s_c = blue_team.s_c, s_d = blue_team.s_d,
+                       n_dim = n_dim, var_z = var_z, var_y = var_y, alpha = alpha_error, beta = beta_error)
 
     state_traj_list = []
     control_traj_list = []
@@ -71,8 +79,8 @@ def run_experiments_with_fixed_lambda(num_traj, len_traj, s_b_value, s_c_value, 
     result = {
         "state_trajectories": state_trajectories,
         "control_trajectories": control_trajectories,
-        "mean_state_trajectory": np.mean(state_trajectories, axis = 0),  # (2, len_traj), estimated m*_k's (Mean of x_k's)
-        "mean_control_trajectory": np.mean(control_trajectories, axis = 0),  # (2, len_traj-1)
+        "mean_state_trajectory": np.mean(state_trajectories, axis = 0),  # (2n, len_traj), estimated m*_k's (Mean of x_k's)
+        "mean_control_trajectory": np.mean(control_trajectories, axis = 0),  # (2n, len_traj-1) = (2n, T)
         "mean_primary_cost": np.mean(np.array(primary_cost_list)),  # ()
         "mean_log_L_t": blue_team.mean_logLt,  # (len_traj,)
         "SHT_results": red_team.sequential_hypothesis_test(state_trajectories),  # (num_traj, len_traj)
@@ -90,7 +98,7 @@ def run_experiments_over_lambda(lambda_list, **kwargs):
     results_with_lambda = {}
     for l in lambda_list:
         l = np.round(l,3)
-        results_with_lambda[l] = run_experiments_with_fixed_lambda(num_traj, len_traj, s_b_value, s_c_value,
+        results_with_lambda[l] = run_experiments_with_fixed_lambda(num_traj, terminal_time, s_b_matrix, s_c_matrix,
                                                                    deception_parameter = l, **kwargs)
     return results_with_lambda
 
@@ -105,26 +113,33 @@ def lambda_label(l):
     return r"$\lambda$=" + str(l)
 
 
-def create_trajectory_axes():
+def create_trajectory_axes(component, n_dim):
+    """ 2x2 axes for (v, p, alpha, beta) of one component; labels carry the component index when n_dim > 1 """
 
+    sub = f"_{{{component+1}}}" if n_dim > 1 else ""
     fig, axs = plt.subplots(2,2)
-    axs[0,0].set_ylabel("Velocity, $v$")
-    axs[0,1].set_ylabel("Position, $x$")
+    axs[0,0].set_ylabel(f"Velocity, $v{sub}$")
+    axs[0,1].set_ylabel(f"Position, $p{sub}$")
     axs[1,0].set_xlabel("Time, $t$")
-    axs[1,0].set_ylabel(r"Velocity Control, $\alpha$")
+    axs[1,0].set_ylabel(rf"Velocity Control, $\alpha{sub}$")
     axs[1,1].set_xlabel("Time, $t$")
-    axs[1,1].set_ylabel(r"Position Control, $\beta$")
+    axs[1,1].set_ylabel(rf"Position Control, $\beta{sub}$")
 
     return fig, axs
 
 
-def plot_state_and_control(axs, state_traj, control_traj, **plot_kwargs):
-    """ state_traj: (2, len_traj), control_traj: (2, len_traj-1) """
+def trajectory_title(component, n_dim):
+    return "Trajectories with Misdirection" + (f" (component {component+1})" if n_dim > 1 else "")
 
-    axs[0,0].plot(state_traj[0,:], **plot_kwargs)
-    axs[0,1].plot(state_traj[1,:], **plot_kwargs)
-    axs[1,0].plot(control_traj[0,:], **plot_kwargs)
-    axs[1,1].plot(control_traj[1,:], **plot_kwargs)
+
+def plot_state_and_control(axs, state_traj, control_traj, component, **plot_kwargs):
+    """ state_traj: (2n, len_traj) = (v, p), control_traj: (2n, len_traj-1) = (alpha, beta); plots one component """
+
+    n = state_traj.shape[0]//2
+    axs[0,0].plot(state_traj[component,:], **plot_kwargs)
+    axs[0,1].plot(state_traj[n+component,:], **plot_kwargs)
+    axs[1,0].plot(control_traj[component,:], **plot_kwargs)
+    axs[1,1].plot(control_traj[n+component,:], **plot_kwargs)
 
 
 def plot_over_time_with_lambda(results_with_lambda, key, cmap, len_traj, ylabel, title, log_U = None):
@@ -148,49 +163,61 @@ def plot_over_time_with_lambda(results_with_lambda, key, cmap, len_traj, ylabel,
 # ---------- Introducing misdirection ----------
 
 def plot_trajectories_with_lambda(results_with_lambda, cmap):
+    """ One figure per state component """
 
-    fig, axs = create_trajectory_axes()
     lambda_list = list(results_with_lambda.keys())
+    n = results_with_lambda[lambda_list[0]]["mean_state_trajectory"].shape[0]//2
 
-    for i, l in enumerate(lambda_list):
-        plot_state_and_control(axs, results_with_lambda[l]["mean_state_trajectory"], results_with_lambda[l]["mean_control_trajectory"],
-                               label = lambda_label(l), color = lambda_color(cmap, i, len(lambda_list)))
+    for component in range(n):
+        fig, axs = create_trajectory_axes(component, n)
 
-    fig.suptitle("Trajectories with Misdirection")
-    plt.legend()
-    plt.show()
+        for i, l in enumerate(lambda_list):
+            plot_state_and_control(axs, results_with_lambda[l]["mean_state_trajectory"], results_with_lambda[l]["mean_control_trajectory"],
+                                   component, label = lambda_label(l), color = lambda_color(cmap, i, len(lambda_list)))
+
+        fig.suptitle(trajectory_title(component, n))
+        plt.legend()
+        plt.show()
 
 
 def plot_all_trajectories_with_lambda(results_with_lambda, cmap):
+    """ One figure per state component """
 
-    fig, axs = create_trajectory_axes()
     lambda_list = list(results_with_lambda.keys())
+    n = results_with_lambda[lambda_list[0]]["mean_state_trajectory"].shape[0]//2
 
-    for i, l in enumerate(lambda_list):
-        state_traj = results_with_lambda[l]["state_trajectories"]
-        control_traj = results_with_lambda[l]["control_trajectories"]
-        for j in range(state_traj.shape[0]):
-            plot_state_and_control(axs, state_traj[j], control_traj[j],
-                                   label = lambda_label(l) if j == 0 else None,  # One legend entry per lambda
-                                   color = lambda_color(cmap, i, len(lambda_list)))
+    for component in range(n):
+        fig, axs = create_trajectory_axes(component, n)
 
-    fig.suptitle("Trajectories with Misdirection")
-    plt.legend()
-    plt.show()
+        for i, l in enumerate(lambda_list):
+            state_traj = results_with_lambda[l]["state_trajectories"]
+            control_traj = results_with_lambda[l]["control_trajectories"]
+            for j in range(state_traj.shape[0]):
+                plot_state_and_control(axs, state_traj[j], control_traj[j], component,
+                                       label = lambda_label(l) if j == 0 else None,  # One legend entry per lambda
+                                       color = lambda_color(cmap, i, len(lambda_list)))
+
+        fig.suptitle(trajectory_title(component, n))
+        plt.legend()
+        plt.show()
 
 
 def plot_trajectories_with_misdirection_patterns(deception_parameter = 0.1, patterns = ("standard", "negative", "sinusoidal")):
+    """ One figure per state component """
 
-    fig, axs = create_trajectory_axes()
-
-    for k in patterns:
-        results = run_experiments_with_fixed_lambda(num_traj, len_traj, s_b_value, s_c_value, deception_parameter = deception_parameter,
+    results = {k: run_experiments_with_fixed_lambda(num_traj, terminal_time, s_b_matrix, s_c_matrix, deception_parameter = deception_parameter,
                                                     misdirection_b = k, misdirection_c = k)
-        plot_state_and_control(axs, results["mean_state_trajectory"], results["mean_control_trajectory"], label = k)
+               for k in patterns}
 
-    fig.suptitle("Trajectories with Misdirection")
-    plt.legend()
-    plt.show()
+    for component in range(n_dim):
+        fig, axs = create_trajectory_axes(component, n_dim)
+
+        for k in patterns:
+            plot_state_and_control(axs, results[k]["mean_state_trajectory"], results[k]["mean_control_trajectory"], component, label = k)
+
+        fig.suptitle(trajectory_title(component, n_dim))
+        plt.legend()
+        plt.show()
 
 
 def plot_primary_cost_with_lambda(results_with_lambda, cmap):
