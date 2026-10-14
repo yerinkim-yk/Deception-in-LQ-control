@@ -1,0 +1,269 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from tqdm import tqdm
+
+from blue_team_original import BlueTeam
+from red_team_original import RedTeam
+
+
+# Overall settings
+var_z = 0.05
+var_y = 0.05
+lambda_list = np.arange(0.0,0.51,0.1)
+num_traj = 1
+len_traj = 21
+s_b_value = 0.5
+s_c_value = -0.1
+alpha_error = 0.01
+beta_error = 0.01
+log_U = np.log((1-beta_error)/alpha_error)
+sample_size = 200
+random_noise = False  # False: same seeded noise sequence for every trajectory; True: independent noise
+
+cmap = plt.get_cmap('plasma')
+
+
+# ---------- Experiments ----------
+
+def make_misdirection_pattern(kind, value, length):
+    """ kind: "standard" (constant), "negative" (negated constant), or "sinusoidal". Unknown kinds fall back to "standard". """
+
+    if kind == "negative":
+        return -value*np.ones(length)
+    if kind == "sinusoidal":
+        return value*np.sin(np.linspace(0, length, length))
+    return value*np.ones(length)
+
+
+def run_experiments_with_fixed_lambda(num_traj, len_traj, s_b_value, s_c_value, deception_parameter,
+                                      misdirection_b = "standard", misdirection_c = "standard",
+                                      compute_probabilities = False):
+
+    blue_team = BlueTeam(var_z = var_z,
+                               var_y = var_y,
+                               deception_parameter = deception_parameter,
+                               terminal_time = len_traj,
+                               random_noise = random_noise)
+    blue_team.s_b = make_misdirection_pattern(misdirection_b, s_b_value, len_traj)
+    blue_team.s_c = make_misdirection_pattern(misdirection_c, s_c_value, len_traj)
+    blue_team.set_matrices()
+
+    red_team = RedTeam(terminal_time = len_traj, s_b = blue_team.s_b, s_c = blue_team.s_c, s_d = blue_team.s_d,
+                          var_z = var_z, var_y = var_y, alpha = alpha_error, beta = beta_error)
+
+    state_traj_list = []
+    control_traj_list = []
+    primary_cost_list = []
+
+    for j in tqdm(range(num_traj)):
+
+        blue_team.run_dynamics()
+
+        state_trajectory = np.array(blue_team.state_trajectory).T
+        control_trajectory = np.array(blue_team.control_trajectory).T
+        state_traj_list.append(state_trajectory)
+        control_traj_list.append(control_trajectory)
+        primary_cost_list.append(blue_team.calculate_primary_cost(state_trajectory, control_trajectory))
+
+    state_trajectories = np.array(state_traj_list)
+    control_trajectories = np.array(control_traj_list)
+
+    result = {
+        "state_trajectories": state_trajectories,
+        "control_trajectories": control_trajectories,
+        "mean_state_trajectory": np.mean(state_trajectories, axis = 0),  # (2, len_traj), estimated m*_k's (Mean of x_k's)
+        "mean_control_trajectory": np.mean(control_trajectories, axis = 0),  # (2, len_traj-1)
+        "mean_primary_cost": np.mean(np.array(primary_cost_list)),  # ()
+        "mean_log_L_t": blue_team.mean_logLt,  # (len_traj,)
+        "SHT_results": red_team.sequential_hypothesis_test(state_trajectories),  # (num_traj, len_traj)
+    }
+
+    if compute_probabilities:
+        result["approximated_probability"] = blue_team.calculate_sampling_based_probability(log_U = log_U, sample_size = sample_size)  # (len_traj,)
+        result["bound_for_probability"] = blue_team.get_theorem_2_bounds(log_U = log_U, optimize = True)  # (len_traj,)
+
+    return result
+
+
+def run_experiments_over_lambda(lambda_list, **kwargs):
+
+    results_with_lambda = {}
+    for l in lambda_list:
+        l = np.round(l,3)
+        results_with_lambda[l] = run_experiments_with_fixed_lambda(num_traj, len_traj, s_b_value, s_c_value,
+                                                                   deception_parameter = l, **kwargs)
+    return results_with_lambda
+
+
+# ---------- Plot helpers ----------
+
+def lambda_color(cmap, i, num_lambda):
+    return cmap(i/(1.25*num_lambda-1))
+
+
+def lambda_label(l):
+    return r"$\lambda$=" + str(l)
+
+
+def create_trajectory_axes():
+
+    fig, axs = plt.subplots(2,2)
+    axs[0,0].set_ylabel("Velocity, $v$")
+    axs[0,1].set_ylabel("Position, $x$")
+    axs[1,0].set_xlabel("Time, $t$")
+    axs[1,0].set_ylabel(r"Velocity Control, $\alpha$")
+    axs[1,1].set_xlabel("Time, $t$")
+    axs[1,1].set_ylabel(r"Position Control, $\beta$")
+
+    return fig, axs
+
+
+def plot_state_and_control(axs, state_traj, control_traj, **plot_kwargs):
+    """ state_traj: (2, len_traj), control_traj: (2, len_traj-1) """
+
+    axs[0,0].plot(state_traj[0,:], **plot_kwargs)
+    axs[0,1].plot(state_traj[1,:], **plot_kwargs)
+    axs[1,0].plot(control_traj[0,:], **plot_kwargs)
+    axs[1,1].plot(control_traj[1,:], **plot_kwargs)
+
+
+def plot_over_time_with_lambda(results_with_lambda, key, cmap, len_traj, ylabel, title, log_U = None):
+    """ Line plot of results_with_lambda[l][key] (shape (len_traj,)) over time, one line per lambda """
+
+    lambda_list = list(results_with_lambda.keys())
+
+    for i, l in enumerate(lambda_list):
+        plt.plot(results_with_lambda[l][key], label = lambda_label(l), color = lambda_color(cmap, i, len(lambda_list)))
+
+    if log_U is not None:
+        plt.plot(log_U*np.ones(len_traj), '--', c = 'gray', label = r'$\log U$')
+    plt.xlabel("Time, $t$")
+    plt.xticks(range(0,len_traj,2))
+    plt.ylabel(ylabel)
+    plt.title(title)
+    plt.legend()
+    plt.show()
+
+
+# ---------- Introducing misdirection ----------
+
+def plot_trajectories_with_lambda(results_with_lambda, cmap):
+
+    fig, axs = create_trajectory_axes()
+    lambda_list = list(results_with_lambda.keys())
+
+    for i, l in enumerate(lambda_list):
+        plot_state_and_control(axs, results_with_lambda[l]["mean_state_trajectory"], results_with_lambda[l]["mean_control_trajectory"],
+                               label = lambda_label(l), color = lambda_color(cmap, i, len(lambda_list)))
+
+    fig.suptitle("Trajectories with Misdirection")
+    plt.legend()
+    plt.show()
+
+
+def plot_all_trajectories_with_lambda(results_with_lambda, cmap):
+
+    fig, axs = create_trajectory_axes()
+    lambda_list = list(results_with_lambda.keys())
+
+    for i, l in enumerate(lambda_list):
+        state_traj = results_with_lambda[l]["state_trajectories"]
+        control_traj = results_with_lambda[l]["control_trajectories"]
+        for j in range(state_traj.shape[0]):
+            plot_state_and_control(axs, state_traj[j], control_traj[j],
+                                   label = lambda_label(l) if j == 0 else None,  # One legend entry per lambda
+                                   color = lambda_color(cmap, i, len(lambda_list)))
+
+    fig.suptitle("Trajectories with Misdirection")
+    plt.legend()
+    plt.show()
+
+
+def plot_trajectories_with_misdirection_patterns(deception_parameter = 0.1, patterns = ("standard", "negative", "sinusoidal")):
+
+    fig, axs = create_trajectory_axes()
+
+    for k in patterns:
+        results = run_experiments_with_fixed_lambda(num_traj, len_traj, s_b_value, s_c_value, deception_parameter = deception_parameter,
+                                                    misdirection_b = k, misdirection_c = k)
+        plot_state_and_control(axs, results["mean_state_trajectory"], results["mean_control_trajectory"], label = k)
+
+    fig.suptitle("Trajectories with Misdirection")
+    plt.legend()
+    plt.show()
+
+
+def plot_primary_cost_with_lambda(results_with_lambda, cmap):
+
+    lambda_list = list(results_with_lambda.keys())
+    primary_cost_list = [results_with_lambda[l]["mean_primary_cost"] for l in lambda_list]
+
+    fig, ax = plt.subplots()
+    bar_container = ax.bar(lambda_list, primary_cost_list, width=0.05, color = cmap(0))
+    ax.bar_label(bar_container, fmt='{:,.1f}')
+    ax.set_xlabel(r"Deception parameter, $\lambda$")
+    ax.set_ylabel("Primary cost")
+    ax.set_title("Primary Cost")
+    plt.show()
+
+
+def plot_E_log_L_T_with_lambda(results_with_lambda, log_U, cmap):
+
+    lambda_list = list(results_with_lambda.keys())
+    E_log_L_T_list = [results_with_lambda[l]["mean_log_L_t"][-1] for l in lambda_list]
+
+    plt.plot(lambda_list, E_log_L_T_list, c = cmap(0))
+    plt.plot(lambda_list, log_U*np.ones(len(lambda_list)), '--', c = 'gray')
+    plt.xlabel(r"Deception parameter, $\lambda$")
+    plt.ylabel(r"$E[\log L^*_T]$")
+    plt.title(r"Expected value of $\log L^*_T$")
+    plt.show()
+
+
+def plot_sht_results_with_lambda(results_with_lambda, log_U, cmap, len_traj):
+
+    mean_sht_results = {l: {"mean_SHT_results": np.mean(result["SHT_results"], axis = 0)}
+                        for l, result in results_with_lambda.items()}
+    plot_over_time_with_lambda(mean_sht_results, "mean_SHT_results", cmap, len_traj,
+                               ylabel = r"$\log L^*_t$", title = r"$\log L^*_t$ with Observed Trajectory", log_U = log_U)
+
+
+# ---------- Stealthiness of misdirection ----------
+
+def plot_E_log_L_t_with_lambda(results_with_lambda, log_U, cmap, len_traj):
+
+    plot_over_time_with_lambda(results_with_lambda, "mean_log_L_t", cmap, len_traj,
+                               ylabel = r"$E[\log L^*_t]$", title = r"Expected value of $\log L^*_t$", log_U = log_U)
+
+
+def plot_approximated_probability_with_lambda(results_with_lambda, cmap, len_traj):
+    """ Requires results computed with compute_probabilities=True """
+
+    plot_over_time_with_lambda(results_with_lambda, "approximated_probability", cmap, len_traj,
+                               ylabel = "Approximated probability", title = "Approximated Probability of Detection")
+
+
+def plot_probability_bound_with_lambda(results_with_lambda, cmap, len_traj):
+    """ Requires results computed with compute_probabilities=True """
+
+    plot_over_time_with_lambda(results_with_lambda, "bound_for_probability", cmap, len_traj,
+                               ylabel = "Probability bound", title = "Upper Bound for Probability of Detection")
+
+
+def compare_primary_cost_and_stealthiness_with_lambda():
+    pass
+
+
+if __name__ == '__main__':
+
+    results_with_lambda = run_experiments_over_lambda(lambda_list, compute_probabilities = True)
+
+    plot_trajectories_with_lambda(results_with_lambda, cmap)
+    plot_all_trajectories_with_lambda(results_with_lambda, cmap)
+    plot_primary_cost_with_lambda(results_with_lambda, cmap)
+    plot_sht_results_with_lambda(results_with_lambda, log_U, cmap, len_traj)
+    plot_E_log_L_T_with_lambda(results_with_lambda, log_U, cmap)
+    plot_E_log_L_t_with_lambda(results_with_lambda, log_U, cmap, len_traj)
+    plot_approximated_probability_with_lambda(results_with_lambda, cmap, len_traj)  # needs compute_probabilities=True
+    plot_probability_bound_with_lambda(results_with_lambda, cmap, len_traj)  # needs compute_probabilities=True
+    plot_trajectories_with_misdirection_patterns()
