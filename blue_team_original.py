@@ -1,6 +1,22 @@
 import numpy as np
 import scipy.linalg
+import scipy.stats
 from tqdm import tqdm
+
+
+def score_confidence_interval(p_hat, num_samples, significance = 0.05):
+    """
+    (1 - significance) score confidence interval for a Monte Carlo estimate p_hat from num_samples samples (paper Lemma 2):
+    [(p_hat + kappa/2 - delta)/(1 + kappa), (p_hat + kappa/2 + delta)/(1 + kappa)] with z = Q^{-1}(significance/2),
+    kappa = z^2/n, delta = z*sqrt(p_hat(1 - p_hat)/n + z^2/(4n^2)). Works elementwise; returns (lower, upper).
+    """
+    p_hat = np.asarray(p_hat, dtype=float)
+    z = scipy.stats.norm.isf(significance/2)
+    kappa = z**2/num_samples
+    delta = z*np.sqrt(p_hat*(1-p_hat)/num_samples + z**2/(4*num_samples**2))
+    center = p_hat + kappa/2
+
+    return (center - delta)/(1 + kappa), (center + delta)/(1 + kappa)
 
 
 def as_matrix(value, n_dim):
@@ -19,6 +35,15 @@ def as_vector(value, n_dim):
         return value*np.ones(n_dim)
     assert value.shape == (n_dim,), f"expected a scalar or an ({n_dim},) vector, got shape {value.shape}"
     return value
+
+
+def symmetric_sqrt(matrix):
+    """
+    Symmetric positive semi-definite square root M^{1/2} of a symmetric PSD matrix, via its eigendecomposition.
+    Unlike scipy.linalg.sqrtm, it is reliable for singular matrices (e.g. a deterministic initial state).
+    """
+    eigenvalues, eigenvectors = np.linalg.eigh(matrix)
+    return (eigenvectors*np.sqrt(np.maximum(eigenvalues, 0)))@eigenvectors.T
 
 
 def psd_sqrt(matrix):
@@ -154,7 +179,7 @@ class BlueTeam():
         Largest admissible deception parameter: well-posed if I - lambda var_y^{-1/2} r_beta^{-1} var_y^{-1/2} >= 0 (Theorem 1),
         i.e. lambda <= smallest eigenvalue of var_y^{1/2} r_beta var_y^{1/2} (= r_beta*var_y when n = 1)
         """
-        sqrt_var_y = scipy.linalg.sqrtm(self.var_y).real
+        sqrt_var_y = symmetric_sqrt(self.var_y)
         return np.min(np.linalg.eigvalsh(sqrt_var_y@self.r_beta@sqrt_var_y))
 
     def check_deception_parameter(self):
@@ -309,6 +334,24 @@ class BlueTeam():
         cost += 0.5*v_error_T@self.t_v@v_error_T
 
         return cost
+
+    def calculate_deception_measure(self, state_trajectory, control_trajectory):
+        """
+        Deception measure D(lambda) = d(beta_H0, beta) / d(beta_H0, beta_H1) along one trajectory (paper Eq. (15)),
+        with d(a, b) = sum_{t=0}^{T-1} ||a_t - b_t||_2^2. The controls are evaluated at the states of the given trajectory:
+        beta_H0 = 0 (optimal under H0, Remark 1), beta = the applied control, beta_H1 = F^b_t v_t + F^c_t p_t + f^d_t.
+        By Corollary 1, D = 0 for lambda = 0 and D = 1 for lambda = margin.
+        state_trajectory: (2n, T+1), control_trajectory: (2n, T)
+        """
+        n = self.n_dim
+        T = self.terminal_time
+        s_b, s_c, s_d = self.misdirection_patterns()
+
+        v, p = state_trajectory[:n, :T], state_trajectory[n:, :T]
+        beta = control_trajectory[n:, :T]
+        beta_H1 = np.einsum('tij,jt->it', s_b[:T], v) + np.einsum('tij,jt->it', s_c[:T], p) + s_d[:T].T
+
+        return np.sum(beta**2)/np.sum(beta_H1**2)
 
     # ---------- Stealthiness analysis ----------
 
@@ -500,14 +543,15 @@ class BlueTeam():
 
         # Norms in the exponents only depend on t, so compute them once
         b = 2*self.n_dim  # state dimension
-        cov_state0 = self.initial_covariance()
-        cov_noise = self.noise_covariance()
+        # (Sigma_w^t)^{1/2} = diag(Sigma_0^{1/2}, Sigma_w^{1/2}, ..., Sigma_w^{1/2}) since Sigma_w^t is block diagonal
+        sqrt_cov_state0 = symmetric_sqrt(self.initial_covariance())
+        sqrt_cov_noise = symmetric_sqrt(self.noise_covariance())
         linear_norm_sq = np.zeros(self.terminal_time+1)
         quadratic_fro_sq = np.zeros(self.terminal_time+1)
         quadratic_spec = np.zeros(self.terminal_time+1)
 
         for t in range(self.terminal_time+1):
-            sqrt_cov_w_t = scipy.linalg.sqrtm(scipy.linalg.block_diag(cov_state0, *([cov_noise]*t))).real
+            sqrt_cov_w_t = scipy.linalg.block_diag(sqrt_cov_state0, *([sqrt_cov_noise]*t))
             mean_w_t = np.zeros(b*(t+1))
             mean_w_t[:b] = self.initial_mean()
 

@@ -2,7 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 
-from blue_team_original import BlueTeam
+from blue_team_original import BlueTeam, score_confidence_interval
 from red_team_original import RedTeam
 
 
@@ -20,7 +20,8 @@ s_c_matrix = -0.1*np.eye(n_dim)
 alpha_error = 0.01
 beta_error = 0.01
 log_U = np.log((1-beta_error)/alpha_error)
-sample_size = 20000
+sample_size = 200
+significance = 0.05  # c in Lemma 2: (1-c) confidence intervals for the sampled detection probabilities
 random_noise = False  # False: fixed seed, every lambda sees the same noise sequence (trajectories still differ); True: fresh noise each run
 
 cmap = plt.get_cmap('plasma')
@@ -62,6 +63,7 @@ def run_experiments_with_fixed_lambda(num_traj, terminal_time, s_b_matrix, s_c_m
     state_traj_list = []
     control_traj_list = []
     primary_cost_list = []
+    deception_measure_list = []
 
     for j in tqdm(range(num_traj)):
 
@@ -72,6 +74,7 @@ def run_experiments_with_fixed_lambda(num_traj, terminal_time, s_b_matrix, s_c_m
         state_traj_list.append(state_trajectory)
         control_traj_list.append(control_trajectory)
         primary_cost_list.append(blue_team.calculate_primary_cost(state_trajectory, control_trajectory))
+        deception_measure_list.append(blue_team.calculate_deception_measure(state_trajectory, control_trajectory))
 
     state_trajectories = np.array(state_traj_list)
     control_trajectories = np.array(control_traj_list)
@@ -82,12 +85,14 @@ def run_experiments_with_fixed_lambda(num_traj, terminal_time, s_b_matrix, s_c_m
         "mean_state_trajectory": np.mean(state_trajectories, axis = 0),  # (2n, len_traj), estimated m*_k's (Mean of x_k's)
         "mean_control_trajectory": np.mean(control_trajectories, axis = 0),  # (2n, len_traj-1) = (2n, T)
         "mean_primary_cost": np.mean(np.array(primary_cost_list)),  # ()
+        "mean_deception_measure": np.mean(np.array(deception_measure_list)),  # (), D(lambda), Eq. (15)
         "mean_log_L_t": blue_team.mean_logLt,  # (len_traj,)
         "SHT_results": red_team.sequential_hypothesis_test(state_trajectories),  # (num_traj, len_traj)
     }
 
     if compute_probabilities:
         result["approximated_probability"] = blue_team.calculate_sampling_based_probability(log_U = log_U, sample_size = sample_size)  # (len_traj,)
+        result["approximated_probability_CI"] = np.array(score_confidence_interval(result["approximated_probability"], sample_size, significance))  # (2, len_traj): lower, upper
         result["bound_for_probability"] = blue_team.get_theorem_2_bounds(log_U = log_U, optimize = True)  # (len_traj,)
 
     return result
@@ -142,13 +147,20 @@ def plot_state_and_control(axs, state_traj, control_traj, component, **plot_kwar
     axs[1,1].plot(control_traj[n+component,:], **plot_kwargs)
 
 
-def plot_over_time_with_lambda(results_with_lambda, key, cmap, len_traj, ylabel, title, log_U = None):
-    """ Line plot of results_with_lambda[l][key] (shape (len_traj,)) over time, one line per lambda """
+def plot_over_time_with_lambda(results_with_lambda, key, cmap, len_traj, ylabel, title, log_U = None, band_key = None):
+    """
+    Line plot of results_with_lambda[l][key] (shape (len_traj,)) over time, one line per lambda.
+    band_key: optional key of a (2, len_traj) array (lower, upper) shaded around each line.
+    """
 
     lambda_list = list(results_with_lambda.keys())
 
     for i, l in enumerate(lambda_list):
-        plt.plot(results_with_lambda[l][key], label = lambda_label(l), color = lambda_color(cmap, i, len(lambda_list)))
+        color = lambda_color(cmap, i, len(lambda_list))
+        plt.plot(results_with_lambda[l][key], label = lambda_label(l), color = color)
+        if band_key is not None:
+            lower, upper = results_with_lambda[l][band_key]
+            plt.fill_between(range(len(lower)), lower, upper, color = color, alpha = 0.3)
 
     if log_U is not None:
         plt.plot(log_U*np.ones(len_traj), '--', c = 'gray', label = r'$\log U$')
@@ -234,6 +246,36 @@ def plot_primary_cost_with_lambda(results_with_lambda, cmap):
     plt.show()
 
 
+def plot_deception_measure_and_primary_cost_with_lambda(results_with_lambda, cmap = None):
+    """
+    Grouped bars of the deception measure D(lambda) (Eq. (15), left axis, navy) and the primary cost
+    (right axis, orange) against lambda, as in the paper's Fig. 1b. cmap is unused (kept for a uniform signature).
+    """
+
+    lambda_list = list(results_with_lambda.keys())
+    deception_measure_list = [results_with_lambda[l]["mean_deception_measure"] for l in lambda_list]
+    primary_cost_list = [results_with_lambda[l]["mean_primary_cost"] for l in lambda_list]
+
+    x = np.arange(len(lambda_list))
+    width = 0.35
+
+    fig, ax = plt.subplots()
+    ax_cost = ax.twinx()
+    bars_D = ax.bar(x - width/2, deception_measure_list, width, color = 'navy', label = "Deception measure")
+    bars_cost = ax_cost.bar(x + width/2, primary_cost_list, width, color = 'orange', label = "Primary cost")
+    ax.bar_label(bars_D, fmt = '{:.1f}')
+    ax_cost.bar_label(bars_cost, fmt = '{:.0f}')
+
+    ax.set_xticks(x, [f"{l:.1f}" for l in lambda_list])
+    ax.set_xlabel(r"$\lambda$")
+    ax.set_ylabel(r"$\mathcal{D}(\lambda)$")
+    ax_cost.set_ylabel("Primary cost")
+    ax.set_ylim(0, 1.1)
+    ax_cost.set_ylim(0, 1.15*max(primary_cost_list))
+    ax.legend(handles = [bars_D, bars_cost], loc = "upper left")
+    plt.show()
+
+
 def plot_E_log_L_T_with_lambda(results_with_lambda, log_U, cmap):
 
     lambda_list = list(results_with_lambda.keys())
@@ -264,10 +306,11 @@ def plot_E_log_L_t_with_lambda(results_with_lambda, log_U, cmap, len_traj):
 
 
 def plot_approximated_probability_with_lambda(results_with_lambda, cmap, len_traj):
-    """ Requires results computed with compute_probabilities=True """
+    """ Requires results computed with compute_probabilities=True; shaded areas are the Lemma 2 confidence intervals """
 
     plot_over_time_with_lambda(results_with_lambda, "approximated_probability", cmap, len_traj,
-                               ylabel = "Approximated probability", title = "Approximated Probability of Detection")
+                               ylabel = "Approximated probability", title = "Approximated Probability of Detection",
+                               band_key = "approximated_probability_CI")
 
 
 def plot_probability_bound_with_lambda(results_with_lambda, cmap, len_traj):
@@ -288,6 +331,7 @@ if __name__ == '__main__':
     plot_trajectories_with_lambda(results_with_lambda, cmap)
     plot_all_trajectories_with_lambda(results_with_lambda, cmap)
     plot_primary_cost_with_lambda(results_with_lambda, cmap)
+    plot_deception_measure_and_primary_cost_with_lambda(results_with_lambda, cmap)
     plot_sht_results_with_lambda(results_with_lambda, log_U, cmap, len_traj)
     plot_E_log_L_T_with_lambda(results_with_lambda, log_U, cmap)
     plot_E_log_L_t_with_lambda(results_with_lambda, log_U, cmap, len_traj)
