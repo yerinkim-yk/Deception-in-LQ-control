@@ -1,4 +1,4 @@
-# DeceptiveLQR
+# Deception in LQ control
 
 This repository contains the simulation code for our paper
 **[Deception in Linear-Quadratic Control](https://arxiv.org/abs/2604.00227)** (arXiv:2604.00227, 2026),
